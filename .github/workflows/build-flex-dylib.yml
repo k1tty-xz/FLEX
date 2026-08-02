@@ -2,116 +2,38 @@ name: Build FLEX dylib
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ master ]
 
 jobs:
   build:
     runs-on: macos-26
 
     steps:
-      - name: Checkout FLEX
-        uses: actions/checkout@v4
-
-      - name: List available Xcode versions
-        run: ls /Applications | grep -i xcode
+      - uses: actions/checkout@v4
 
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
 
-      - name: Log toolchain versions
+      - name: Build
         run: |
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-version
-          xcrun --sdk iphonesimulator --show-sdk-version
-
-      - name: List scheme (sanity check before build)
-        run: xcodebuild -list -project FLEX.xcodeproj
-
-      - name: Build for device (arm64/arm64e)
-        run: |
-          set -o pipefail
           xcodebuild \
             -project FLEX.xcodeproj \
             -scheme FLEX \
             -sdk iphoneos \
             -configuration Release \
-            -derivedDataPath build/device \
+            -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
-            build | tee device-build.log
+            build
 
-      - name: Build for simulator (arm64/x86_64)
+      - name: Extract dylib
         run: |
-          set -o pipefail
-          xcodebuild \
-            -project FLEX.xcodeproj \
-            -scheme FLEX \
-            -sdk iphonesimulator \
-            -configuration Release \
-            -derivedDataPath build/sim \
-            CODE_SIGNING_ALLOWED=NO \
-            build | tee sim-build.log
-
-      - name: Locate build products
-        run: |
-          echo "---- everything named FLEX.framework ----"
-          find build -name "FLEX.framework"
-          echo "---- Build/Products dirs only (the ones we actually want) ----"
-          find build -path "*/Build/Products/*/FLEX.framework"
-
-      - name: Merge device + simulator slices (fat dylib)
-        run: |
-          set -euo pipefail
-
-          # Anchored to Build/Products specifically - the Intermediates.noindex/
-          # EagerLinkingTBDs copy also matches "*Release-iphoneos*" but only
-          # contains a .tbd stub, not the real binary, which breaks lipo.
-          DEVICE_FW=$(find build/device -path "*/Build/Products/Release-iphoneos/FLEX.framework" | head -1)
-          SIM_FW=$(find build/sim -path "*/Build/Products/Release-iphonesimulator/FLEX.framework" | head -1)
-
-          echo "Device framework: $DEVICE_FW"
-          echo "Simulator framework: $SIM_FW"
-
-          if [ -z "$DEVICE_FW" ] || [ -z "$SIM_FW" ]; then
-            echo "::error::Could not locate one or both FLEX.framework build products. See 'Locate build products' step above."
-            exit 1
-          fi
-
-          file "$DEVICE_FW/FLEX"
-          file "$SIM_FW/FLEX"
-
+          FW=build/Build/Products/Release-iphoneos/FLEX.framework
           mkdir -p out
-          lipo -create \
-            "$DEVICE_FW/FLEX" \
-            "$SIM_FW/FLEX" \
-            -output out/FLEX.dylib
+          cp "$FW/FLEX" out/FLEX-ios.dylib
+          cp -R "$FW/Headers" out/Headers
+          install_name_tool -id "@rpath/FLEX-ios.dylib" out/FLEX-ios.dylib
+          codesign -f -s - out/FLEX-ios.dylib
 
-          echo "---- lipo -info on merged dylib ----"
-          lipo -info out/FLEX.dylib
-
-          # Keep headers around too, they are useful even without the framework wrapper
-          cp -R "$DEVICE_FW/Headers" out/Headers
-
-      - name: Fix install name and ad-hoc sign
-        run: |
-          set -x
-          install_name_tool -id "@rpath/FLEX.dylib" out/FLEX.dylib
-          codesign -f -s - out/FLEX.dylib
-          codesign -dv out/FLEX.dylib
-
-      - name: Upload build logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: |
-            device-build.log
-            sim-build.log
-          if-no-files-found: warn
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: FLEX-dylib
           path: out/
-          if-no-files-found: error
