@@ -7,17 +7,30 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-26
 
     steps:
       - name: Checkout FLEX
         uses: actions/checkout@v4
 
+      - name: List available Xcode versions
+        run: ls /Applications | grep -i xcode
+
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+        run: sudo xcode-select -s /Applications/Xcode_26.4.1.app
+
+      - name: Log toolchain versions
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphonesimulator --show-sdk-version
+
+      - name: List scheme (sanity check before build)
+        run: xcodebuild -list -project FLEX.xcodeproj
 
       - name: Build for device (arm64/arm64e)
         run: |
+          set -o pipefail
           xcodebuild \
             -project FLEX.xcodeproj \
             -scheme FLEX \
@@ -25,10 +38,11 @@ jobs:
             -configuration Release \
             -derivedDataPath build/device \
             CODE_SIGNING_ALLOWED=NO \
-            build
+            build | tee device-build.log
 
       - name: Build for simulator (arm64/x86_64)
         run: |
+          set -o pipefail
           xcodebuild \
             -project FLEX.xcodeproj \
             -scheme FLEX \
@@ -36,17 +50,35 @@ jobs:
             -configuration Release \
             -derivedDataPath build/sim \
             CODE_SIGNING_ALLOWED=NO \
-            build
+            build | tee sim-build.log
 
       - name: Locate build products
         run: |
-          find build -name "FLEX.framework" -maxdepth 6
+          echo "---- everything named FLEX.framework ----"
+          find build -name "FLEX.framework"
+          echo "---- Build/Products dirs only (the ones we actually want) ----"
+          find build -path "*/Build/Products/*/FLEX.framework"
 
       - name: Merge device + simulator slices (fat dylib)
         run: |
-          set -e
-          DEVICE_FW=$(find build/device -name "FLEX.framework" -path "*Release-iphoneos*" | head -1)
-          SIM_FW=$(find build/sim -name "FLEX.framework" -path "*Release-iphonesimulator*" | head -1)
+          set -euo pipefail
+
+          # Anchored to Build/Products specifically - the Intermediates.noindex/
+          # EagerLinkingTBDs copy also matches "*Release-iphoneos*" but only
+          # contains a .tbd stub, not the real binary, which breaks lipo.
+          DEVICE_FW=$(find build/device -path "*/Build/Products/Release-iphoneos/FLEX.framework" | head -1)
+          SIM_FW=$(find build/sim -path "*/Build/Products/Release-iphonesimulator/FLEX.framework" | head -1)
+
+          echo "Device framework: $DEVICE_FW"
+          echo "Simulator framework: $SIM_FW"
+
+          if [ -z "$DEVICE_FW" ] || [ -z "$SIM_FW" ]; then
+            echo "::error::Could not locate one or both FLEX.framework build products. See 'Locate build products' step above."
+            exit 1
+          fi
+
+          file "$DEVICE_FW/FLEX"
+          file "$SIM_FW/FLEX"
 
           mkdir -p out
           lipo -create \
@@ -54,6 +86,7 @@ jobs:
             "$SIM_FW/FLEX" \
             -output out/FLEX.dylib
 
+          echo "---- lipo -info on merged dylib ----"
           lipo -info out/FLEX.dylib
 
           # Keep headers around too, they are useful even without the framework wrapper
@@ -61,8 +94,20 @@ jobs:
 
       - name: Fix install name and ad-hoc sign
         run: |
+          set -x
           install_name_tool -id "@rpath/FLEX.dylib" out/FLEX.dylib
           codesign -f -s - out/FLEX.dylib
+          codesign -dv out/FLEX.dylib
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            device-build.log
+            sim-build.log
+          if-no-files-found: warn
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
