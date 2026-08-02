@@ -1,0 +1,72 @@
+name: Build FLEX dylib
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout FLEX
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Build for device (arm64/arm64e)
+        run: |
+          xcodebuild \
+            -project FLEX.xcodeproj \
+            -scheme FLEX \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build/device \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Build for simulator (arm64/x86_64)
+        run: |
+          xcodebuild \
+            -project FLEX.xcodeproj \
+            -scheme FLEX \
+            -sdk iphonesimulator \
+            -configuration Release \
+            -derivedDataPath build/sim \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Locate build products
+        run: |
+          find build -name "FLEX.framework" -maxdepth 6
+
+      - name: Merge device + simulator slices (fat dylib)
+        run: |
+          set -e
+          DEVICE_FW=$(find build/device -name "FLEX.framework" -path "*Release-iphoneos*" | head -1)
+          SIM_FW=$(find build/sim -name "FLEX.framework" -path "*Release-iphonesimulator*" | head -1)
+
+          mkdir -p out
+          lipo -create \
+            "$DEVICE_FW/FLEX" \
+            "$SIM_FW/FLEX" \
+            -output out/FLEX.dylib
+
+          lipo -info out/FLEX.dylib
+
+          # Keep headers around too, they are useful even without the framework wrapper
+          cp -R "$DEVICE_FW/Headers" out/Headers
+
+      - name: Fix install name and ad-hoc sign
+        run: |
+          install_name_tool -id "@rpath/FLEX.dylib" out/FLEX.dylib
+          codesign -f -s - out/FLEX.dylib
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FLEX-dylib
+          path: out/
+          if-no-files-found: error
